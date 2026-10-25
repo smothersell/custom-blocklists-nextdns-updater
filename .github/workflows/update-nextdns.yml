@@ -1,7 +1,28 @@
+name: Update NextDNS denylist
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+jobs:
+  update-denylist:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install NextDNS CLI
+        shell: bash
+        run: |
+          curl -fsSL https://nextdns.io/install | bash
+          nextdnsctl version
+
       - name: Update denylist for all accounts
         env:
           NEXTDNS_ACCOUNT_1_API_KEY: ${{ secrets.NEXTDNS_ACCOUNT_1_API_KEY }}
-
+        shell: bash
         run: |
           LISTS_FILE="blocklists.txt"
 
