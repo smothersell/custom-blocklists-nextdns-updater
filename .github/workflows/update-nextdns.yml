@@ -24,6 +24,8 @@ jobs:
           NEXTDNS_ACCOUNT_1_API_KEY: ${{ secrets.NEXTDNS_ACCOUNT_1_API_KEY }}
         shell: bash
         run: |
+          set -u
+
           LISTS_FILE="blocklists.txt"
 
           if [ ! -f "$LISTS_FILE" ]; then
@@ -84,7 +86,7 @@ jobs:
             secret_name="NEXTDNS_ACCOUNT_${account_num}_API_KEY"
             api_key_value=${!secret_name}
 
-            if [ -z "$api_key_value" ]; then
+            if [ -z "${api_key_value:-}" ]; then
               echo "No more accounts found (checked up to account $((account_num - 1)))"
               break
             fi
@@ -111,10 +113,20 @@ jobs:
               continue
             fi
 
-            profiles=$(printf '%s\n' "$profile_list_output" | grep -oP '^[a-z0-9]+(?=:)' | grep -v '^$' || true)
+            # Parse only valid profile IDs: exactly 6 lowercase alphanumeric chars
+            profiles=$(printf '%s\n' "$profile_list_output" \
+              | tr -d '\r' \
+              | awk -F: '
+                  /^[[:space:]]*[a-z0-9]{6}[[:space:]]*:/ {
+                    id=$1
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+                    print id
+                  }
+                ' \
+              | sort -u)
 
-            if [ -z "$profiles" ]; then
-              echo "::warning::No profiles found for account $account_num"
+            if [ -z "${profiles:-}" ]; then
+              echo "::warning::No valid profile IDs found for account $account_num"
               echo "This usually means the API key is invalid, expired, or the account has no profiles."
               account_num=$((account_num + 1))
               continue
@@ -179,7 +191,7 @@ jobs:
               echo ""
             done
 
-            if [ $account_failed -eq 0 ]; then
+            if [ "$account_failed" -eq 0 ]; then
               echo "✓ All profiles updated successfully for account $account_num!"
             else
               echo "✗ Some profiles failed for account $account_num"
@@ -193,7 +205,7 @@ jobs:
           echo "Update cycle complete"
           echo "================================"
 
-          if [ $total_failed -eq 1 ]; then
+          if [ "$total_failed" -eq 1 ]; then
             echo "::error::Some accounts had failures"
             exit 1
           fi
