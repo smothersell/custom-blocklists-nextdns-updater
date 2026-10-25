@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install NextDNS CLI
@@ -19,27 +19,21 @@ jobs:
           curl -fsSL https://nextdns.io/install | bash
           nextdnsctl version
 
-      - name: Update denylist for all accounts
+      - name: Update denylist
         env:
           NEXTDNS_ACCOUNT_1_API_KEY: ${{ secrets.NEXTDNS_ACCOUNT_1_API_KEY }}
+          NEXTDNS_PROFILE_ID: ${{ secrets.NEXTDNS_PROFILE_ID }}
         shell: bash
         run: |
-          set -u
+          set -e
 
           LISTS_FILE="blocklists.txt"
+          [ -f "$LISTS_FILE" ] || { echo "::error::Blocklists file not found"; exit 1; }
 
-          if [ ! -f "$LISTS_FILE" ]; then
-            echo "::error::Blocklists file not found: $LISTS_FILE"
-            echo "Create it with one blocklist URL per line."
-            exit 1
-          fi
+          export NEXTDNS_API_KEY="$NEXTDNS_ACCOUNT_1_API_KEY"
+          PROFILE_ID="$NEXTDNS_PROFILE_ID"
 
-          url_count=$(grep -cv '^\s*$\|^\s*#' "$LISTS_FILE")
-          if [ "$url_count" -eq 0 ]; then
-            echo "::error::No URLs found in $LISTS_FILE"
-            exit 1
-          fi
-          echo "Found $url_count blocklist URL(s) in $LISTS_FILE"
+          echo "Using NextDNS profile ID: $PROFILE_ID"
 
           TEMP_DIR=$(mktemp -d)
           trap 'rm -rf "$TEMP_DIR"' EXIT
@@ -47,167 +41,26 @@ jobs:
           COMBINED_RAW="$TEMP_DIR/blocklist_combined_raw.txt"
           touch "$COMBINED_RAW"
 
-          # Download each blocklist URL and merge
-          url_index=1
           while IFS= read -r url || [ -n "$url" ]; do
             url=$(echo "$url" | sed 's/[[:space:]]*$//' | sed 's/^[[:space:]]*//')
             [ -z "$url" ] && continue
             case "$url" in \#*) continue;; esac
-
-            echo ""
-            echo "Downloading blocklist $url_index: $url"
-            if curl -sfL "$url" -o "$TEMP_DIR/source_$url_index.txt"; then
-              lines=$(wc -l < "$TEMP_DIR/source_$url_index.txt")
-              echo "  ✓ Downloaded ($lines lines)"
-              cat "$TEMP_DIR/source_$url_index.txt" >> "$COMBINED_RAW"
-            else
-              echo "  ::error::Failed to download: $url"
-              exit 1
-            fi
-            url_index=$((url_index + 1))
+            curl -sfL "$url" -o "$TEMP_DIR/tmp.txt"
+            cat "$TEMP_DIR/tmp.txt" >> "$COMBINED_RAW"
           done < "$LISTS_FILE"
 
-          echo ""
-          echo "Combined raw blocklist: $(wc -l < "$COMBINED_RAW") total lines"
-
-          CLEAN_FILE="$TEMP_DIR/blocklist_clean.txt"
+          CLEAN_FILE="$TEMP_DIR/clean.txt"
           sed 's/#.*//' "$COMBINED_RAW" \
             | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
             | grep -v '^$' \
             | sort -u > "$CLEAN_FILE"
 
-          CLEAN_COUNT=$(wc -l < "$CLEAN_FILE")
-          echo "✓ Normalized combined blocklist: $CLEAN_COUNT unique domains"
-
-          account_num=1
-          total_failed=0
-
-          while true; do
-            secret_name="NEXTDNS_ACCOUNT_${account_num}_API_KEY"
-            api_key_value=${!secret_name}
-
-            if [ -z "${api_key_value:-}" ]; then
-              echo "No more accounts found (checked up to account $((account_num - 1)))"
-              break
-            fi
-
-            echo ""
-            echo "================================"
-            echo "Processing account $account_num"
-            echo "================================"
-
-            export NEXTDNS_API_KEY="$api_key_value"
-
-            echo "Fetching all profiles for account $account_num..."
-            profile_list_output=$(nextdnsctl profile-list 2>&1)
-            profile_list_status=$?
-
-            echo "Raw nextdnsctl profile-list output for account $account_num:"
-            printf '%s\n' "$profile_list_output"
-
-            if [ "$profile_list_status" -ne 0 ]; then
-              echo "::error::nextdnsctl profile-list failed for account $account_num"
-              account_failed=1
-              total_failed=1
-              account_num=$((account_num + 1))
-              continue
-            fi
-
-            # Parse only valid profile IDs: exactly 6 lowercase alphanumeric chars
-            profiles=$(printf '%s\n' "$profile_list_output" \
-              | tr -d '\r' \
-              | awk -F: '
-                  /^[[:space:]]*[a-z0-9]{6}[[:space:]]*:/ {
-                    id=$1
-                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
-                    print id
-                  }
-                ' \
-              | sort -u)
-
-            if [ -z "${profiles:-}" ]; then
-              echo "::warning::No valid profile IDs found for account $account_num"
-              echo "This usually means the API key is invalid, expired, or the account has no profiles."
-              account_num=$((account_num + 1))
-              continue
-            fi
-
-            echo "Found profiles:"
-            echo "$profiles"
-            echo ""
-
-            account_failed=0
-
-            for profile in $profiles; do
-              echo "--- Profile: $profile ---"
-
-              echo "Exporting current denylist..."
-              export_output=$(nextdnsctl denylist export "$profile" 2>&1)
-              export_status=$?
-
-              if [ "$export_status" -eq 0 ]; then
-                printf '%s\n' "$export_output" \
-                  | sed 's/#.*//' \
-                  | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-                  | grep -v '^$' \
-                  | sort -u > "$TEMP_DIR/current_${profile}.txt"
-
-                STALE_FILE="$TEMP_DIR/stale_${profile}.txt"
-                comm -23 "$TEMP_DIR/current_${profile}.txt" "$CLEAN_FILE" > "$STALE_FILE"
-
-                stale_count=$(wc -l < "$STALE_FILE")
-
-                if [ "$stale_count" -gt 0 ]; then
-                  echo "Found $stale_count stale domain(s) to remove"
-                  remove_output=$(xargs -r nextdnsctl denylist remove "$profile" < "$STALE_FILE" 2>&1)
-                  remove_status=$?
-                  if [ "$remove_status" -eq 0 ]; then
-                    echo "✓ Removed $stale_count stale domain(s)"
-                  else
-                    echo "::warning::Some stale domains may not have been removed for profile $profile"
-                    printf '%s\n' "$remove_output"
-                  fi
-                else
-                  echo "No stale domains found"
-                fi
-              else
-                echo "::warning::Failed to export denylist for profile $profile"
-                printf '%s\n' "$export_output"
-                echo "::warning::Skipping cleanup for profile $profile"
-              fi
-
-              echo "Importing blocklist..."
-              import_output=$(nextdnsctl denylist import "$profile" "$COMBINED_RAW" 2>&1)
-              import_status=$?
-
-              if [ "$import_status" -eq 0 ]; then
-                echo "✓ Import completed for profile: $profile"
-              else
-                echo "✗ Failed to import for profile: $profile"
-                printf '%s\n' "$import_output"
-                account_failed=1
-                total_failed=1
-              fi
-              echo ""
-            done
-
-            if [ "$account_failed" -eq 0 ]; then
-              echo "✓ All profiles updated successfully for account $account_num!"
-            else
-              echo "✗ Some profiles failed for account $account_num"
-            fi
-
-            account_num=$((account_num + 1))
-          done
-
-          echo ""
-          echo "================================"
-          echo "Update cycle complete"
-          echo "================================"
-
-          if [ "$total_failed" -eq 1 ]; then
-            echo "::error::Some accounts had failures"
+          echo "Exporting current denylist..."
+          nextdnsctl denylist export "$PROFILE_ID" > "$TEMP_DIR/current.txt" 2>&1 || {
+            echo "::error::Failed to export denylist"
+            cat "$TEMP_DIR/current.txt"
             exit 1
-          fi
+          }
 
-          echo "✓ All accounts processed successfully!"
+          echo "Importing blocklist..."
+          nextdnsctl denylist import "$PROFILE_ID" "$COMBINED_RAW"
