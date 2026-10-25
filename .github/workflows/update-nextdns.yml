@@ -26,10 +26,7 @@ jobs:
       - name: Update denylist for all accounts
         env:
           NEXTDNS_ACCOUNT_1_API_KEY: ${{ secrets.NEXTDNS_ACCOUNT_1_API_KEY }}
-          NEXTDNS_ACCOUNT_2_API_KEY: ${{ secrets.NEXTDNS_ACCOUNT_2_API_KEY }}
-          NEXTDNS_ACCOUNT_3_API_KEY: ${{ secrets.NEXTDNS_ACCOUNT_3_API_KEY }}
-          NEXTDNS_ACCOUNT_4_API_KEY: ${{ secrets.NEXTDNS_ACCOUNT_4_API_KEY }}
-          NEXTDNS_ACCOUNT_5_API_KEY: ${{ secrets.NEXTDNS_ACCOUNT_5_API_KEY }}
+
         run: |
           LISTS_FILE="blocklists.txt"
 
