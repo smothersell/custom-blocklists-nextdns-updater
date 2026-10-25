@@ -1,28 +1,3 @@
-name: Update NextDNS Denylist
-
-on:
-  schedule:
-    - cron: '0 2 * * *'
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-  update-denylist:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: Install nextdnsctl
-        run: pip install nextdnsctl
-
       - name: Update denylist for all accounts
         env:
           NEXTDNS_ACCOUNT_1_API_KEY: ${{ secrets.NEXTDNS_ACCOUNT_1_API_KEY }}
@@ -52,7 +27,6 @@ jobs:
           # Download each blocklist URL and merge
           url_index=1
           while IFS= read -r url || [ -n "$url" ]; do
-            # Skip empty lines and comments
             url=$(echo "$url" | sed 's/[[:space:]]*$//' | sed 's/^[[:space:]]*//')
             [ -z "$url" ] && continue
             case "$url" in \#*) continue;; esac
@@ -73,7 +47,6 @@ jobs:
           echo ""
           echo "Combined raw blocklist: $(wc -l < "$COMBINED_RAW") total lines"
 
-          # Normalize: strip inline comments, trim whitespace, drop empty lines, sort+dedup
           CLEAN_FILE="$TEMP_DIR/blocklist_clean.txt"
           sed 's/#.*//' "$COMBINED_RAW" \
             | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
@@ -103,10 +76,25 @@ jobs:
             export NEXTDNS_API_KEY="$api_key_value"
 
             echo "Fetching all profiles for account $account_num..."
-            profiles=$(nextdnsctl profile-list 2>/dev/null | grep -oP '^[a-z0-9]+(?=:)' | grep -v '^$')
+            profile_list_output=$(nextdnsctl profile-list 2>&1)
+            profile_list_status=$?
+
+            echo "Raw nextdnsctl profile-list output for account $account_num:"
+            printf '%s\n' "$profile_list_output"
+
+            if [ "$profile_list_status" -ne 0 ]; then
+              echo "::error::nextdnsctl profile-list failed for account $account_num"
+              account_failed=1
+              total_failed=1
+              account_num=$((account_num + 1))
+              continue
+            fi
+
+            profiles=$(printf '%s\n' "$profile_list_output" | grep -oP '^[a-z0-9]+(?=:)' | grep -v '^$' || true)
 
             if [ -z "$profiles" ]; then
               echo "::warning::No profiles found for account $account_num"
+              echo "This usually means the API key is invalid, expired, or the account has no profiles."
               account_num=$((account_num + 1))
               continue
             fi
@@ -120,13 +108,16 @@ jobs:
             for profile in $profiles; do
               echo "--- Profile: $profile ---"
 
-              # Step 1: Export current denylist and find stale entries
               echo "Exporting current denylist..."
-              if nextdnsctl denylist export "$profile" 2>/dev/null \
-                | sed 's/#.*//' \
-                | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-                | grep -v '^$' \
-                | sort -u > "$TEMP_DIR/current_${profile}.txt"; then
+              export_output=$(nextdnsctl denylist export "$profile" 2>&1)
+              export_status=$?
+
+              if [ "$export_status" -eq 0 ]; then
+                printf '%s\n' "$export_output" \
+                  | sed 's/#.*//' \
+                  | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+                  | grep -v '^$' \
+                  | sort -u > "$TEMP_DIR/current_${profile}.txt"
 
                 STALE_FILE="$TEMP_DIR/stale_${profile}.txt"
                 comm -23 "$TEMP_DIR/current_${profile}.txt" "$CLEAN_FILE" > "$STALE_FILE"
@@ -135,24 +126,32 @@ jobs:
 
                 if [ "$stale_count" -gt 0 ]; then
                   echo "Found $stale_count stale domain(s) to remove"
-                  if xargs -r nextdnsctl denylist remove "$profile" < "$STALE_FILE" 2>&1; then
+                  remove_output=$(xargs -r nextdnsctl denylist remove "$profile" < "$STALE_FILE" 2>&1)
+                  remove_status=$?
+                  if [ "$remove_status" -eq 0 ]; then
                     echo "✓ Removed $stale_count stale domain(s)"
                   else
                     echo "::warning::Some stale domains may not have been removed for profile $profile"
+                    printf '%s\n' "$remove_output"
                   fi
                 else
                   echo "No stale domains found"
                 fi
               else
-                echo "::warning::Failed to export denylist for profile $profile, skipping cleanup"
+                echo "::warning::Failed to export denylist for profile $profile"
+                printf '%s\n' "$export_output"
+                echo "::warning::Skipping cleanup for profile $profile"
               fi
 
-              # Step 2: Import (delta-aware, only adds missing domains)
               echo "Importing blocklist..."
-              if nextdnsctl denylist import "$profile" "$COMBINED_RAW" 2>&1; then
+              import_output=$(nextdnsctl denylist import "$profile" "$COMBINED_RAW" 2>&1)
+              import_status=$?
+
+              if [ "$import_status" -eq 0 ]; then
                 echo "✓ Import completed for profile: $profile"
               else
                 echo "✗ Failed to import for profile: $profile"
+                printf '%s\n' "$import_output"
                 account_failed=1
                 total_failed=1
               fi
