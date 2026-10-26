@@ -66,4 +66,4 @@ jobs:
           }
 
           echo "Importing blocklist..."
-          nextdnsctl denylist import "$CLEAN_FILE"
+          nextdnsctl denylist import "$CLEAN_FILE" --skip-invalid
